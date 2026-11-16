@@ -92,11 +92,3 @@ Sources/HomePodRestore/       SwiftUI app, IOKit USB monitor
 scripts/                      build-app.sh, bundle-tools.sh, setup-tools.sh, gaster patch
 Distribution/manifest.json    remote catalog to host on nicsfix.com
 ```
-
-## Not yet verified on hardware
-
-Everything was compiled and type-checked against the macOS SDK and the core logic is unit-tested
-(including fake-tool end-to-end runs), but nothing has run against a real HomePod yet. Things to
-check first: DFU detection/ECID parsing from IOKit, USB speed reporting, the patched gaster with
-two pods connected, two simultaneous idevicerestore runs (each briefly probes the other's
-restore-mode device while looking for its own), and the admin-password build flow.
