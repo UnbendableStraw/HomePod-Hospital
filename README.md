@@ -26,7 +26,7 @@ Only the 1st-generation HomePod is supported. HomePod mini and HomePod (2nd gene
 
 - A Mac running macOS 13 or later.
 - A 1st-generation HomePod and a USB adapter for the debug port under its rubber base
-  ([Nic's Fix shop](https://nicsfix.com/shop)).
+  ([Nic's Fix shop](https://nicsfix.com/)).
 - For the factory diagnostics only: a USB-to-serial (UART) adapter.
 
 ## Get started
