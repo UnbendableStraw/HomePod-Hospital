@@ -424,12 +424,19 @@ public struct NicotineSettings: Sendable {
         case save
         /// `restore --wait N`: wait up to N seconds for the pod to answer first.
         case restore(waitSeconds: Int)
+        /// `restore --auto --wait N`: what the app does by itself after a boot.
+        /// A pod that has already put back the settings it keeps on its own
+        /// flash (Nicotine build 117) keeps those and takes only the boot sound
+        /// from the Mac's backup; the Mac's copy is then refreshed from the pod.
+        /// An older pod, or one with nothing stored, gets the backup as with `restore`.
+        case autoRestore(waitSeconds: Int)
         case status
 
         public var arguments: [String] {
             switch self {
             case .save: return ["save"]
             case .restore(let wait): return ["restore", "--wait", String(max(0, wait))]
+            case .autoRestore(let wait): return ["restore", "--auto", "--wait", String(max(0, wait))]
             case .status: return ["status"]
             }
         }
@@ -437,8 +444,15 @@ public struct NicotineSettings: Sendable {
         public var title: String {
             switch self {
             case .save: return "Saving settings"
-            case .restore: return "Restoring saved settings"
+            case .restore, .autoRestore: return "Restoring saved settings"
             case .status: return "Checking settings"
+            }
+        }
+
+        var isRestore: Bool {
+            switch self {
+            case .restore, .autoRestore: return true
+            case .save, .status: return false
             }
         }
     }
@@ -500,7 +514,7 @@ public struct NicotineSettings: Sendable {
     public static func outcome(of action: Action, exitCode: Int32, output: String) -> Outcome {
         let prefix = "homepod-config: "
         let own = output.split(separator: "\n").filter { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) }
-        if case .restore = action, exitCode == 0, own.contains(where: { $0.contains("nothing to restore") }) {
+        if action.isRestore, exitCode == 0, own.contains(where: { $0.contains("nothing to restore") }) {
             return .nothingToRestore
         }
         // The last line the script wrote itself; "(make one with: …)" style hints and
@@ -509,6 +523,17 @@ public struct NicotineSettings: Sendable {
         if exitCode == 0 { return .done(result.isEmpty ? "Done." : result) }
         if exitCode == 3 { return .partial(result.isEmpty ? "Restored, but one step didn't go through." : result) }
         return .failed(result.isEmpty ? "The settings script failed." : result)
+    }
+
+    /// The sentence shown under the buttons after a run that went through.
+    /// `text` is the script's last line (see `outcome`).
+    public static func doneMessage(_ text: String, automatic: Bool) -> String {
+        // A pod that kept the settings from its own flash: the script's line says so.
+        if text.hasPrefix("this pod is using the settings it keeps itself") {
+            return "This HomePod put its own saved settings back when it started"
+                + (text.contains("was updated from it") ? "; the copy on this Mac was updated from it." : ".")
+        }
+        return (automatic ? "Saved settings put back automatically: " : "") + text
     }
 
     /// Runs `homepod-config.sh <action>` in the image folder. Exit code 0 means

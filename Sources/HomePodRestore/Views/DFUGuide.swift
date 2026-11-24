@@ -15,6 +15,9 @@ enum DFUInstructions {
         "Put the HomePod in DFU mode: with it upside down, attach the adapter and plug its USB cable into this Mac, then plug in power. Once it shows up in DFU mode, turn it right-side up and click \(action)."
     }
 
+    /// For a pod in its boot loader's own DFU (same USB mode, but the unlock can't work there).
+    static let fromBootLoaderDFU = "This HomePod is in its boot loader's DFU, not the chip's own, and it can't be unlocked from there. Unplug its power, turn it upside down with the adapter and USB still connected, and plug power back in. When it shows up in DFU mode again, turn it right-side up."
+
     /// For a pod that's running or in recovery: how to get it to DFU.
     static let fromRunning = "Unplug the HomePod's power. Turn it upside down with the adapter and USB still connected, and plug power back in. When it shows up here in DFU mode, turn it right-side up."
 }

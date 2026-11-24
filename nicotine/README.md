@@ -55,6 +55,10 @@ audioOS 16.4 files on first use (see `docs/nicotine-boot.md`).
   - `/usr/sbin/homepod-i2c-pins` — how the SoC pins of the four I2C buses are set (reads only).
   - `/www/cgi-bin/board.cgi` — both readings as JSON for the web UI's Devices tab, which shows them
     as the "Boot State" and "I2C Pins" cards (GET, reads only).
+  Since build 117 the skeleton also has `/usr/sbin/homepod-keep`, `homepod-nvstore`,
+  `homepod-dfu-mode`, `homepod-realdfu` and `homepod-reset`, with `/www/cgi-bin/keep.cgi` and
+  `startup.cgi` for the web UI: settings kept on the pod's own flash, and starting in DFU without
+  turning the pod over. See "Settings on the pod's own flash, and starting in DFU" below.
 - `payload-from-ipsw.sh` — the whole build from one 18.3 IPSW (what `build-app.sh` runs).
 - `build-payload.sh` — assembles the payload from the kit plus firmware and device tree.
 - `tools/pack.py` — IMG4 packer and `--unwrap`, Python standard library only.
@@ -122,10 +126,12 @@ UI (Overview tab, "Boot sound" card) or with `homepod-audio bootsound on`.
   `sounds/nicoboot.mp3` here). The web UI's "Use my own sound..." takes any audio file the browser
   can play, converts it to 48 kHz 16-bit stereo WAV (20 seconds at most) and stores it on the pod
   as `/etc/homepod-bootsound.wav`. Nothing on the pod decodes MP3.
-- **When it plays:** the pod forgets its settings at a power cut, this switch included. So the
-  sound plays when the saved settings are put back after a boot (`homepod-config import --apply`,
-  which HomePod Hospital does), not at power-on. It plays once per boot, at the speaker's volume,
-  and is skipped if something is already playing.
+- **When it plays:** once per boot, at the speaker's volume, skipped if something is already
+  playing. From build 117 the switch comes back from the pod's own flash, so the sound plays as soon
+  as the speakers are up. Before that, and on a pod with nothing stored, it plays when the saved
+  settings are put back after a boot (`homepod-config import --apply`, which HomePod Hospital does).
+  A sound of the user's own is too large for the flash copy: the pod waits up to 40 seconds for the
+  Mac's backup to bring it, then plays the built-in one.
 - To hear it right after the speakers come up instead, build the payload with
   `homepod.bootsound` added to `BOOTARGS` (see `build-payload.sh`); that plays the built-in sound
   on every boot regardless of the switch.
@@ -199,6 +205,86 @@ Set up on the web UI's Speaker tab ("Room" card). The programs are `homepod-room
   (a stock HomePod, an AirPort Express) only for connecting and for timing against a
   shairport-sync receiver (within 1 ms), not by ear; the stereo fill by the pod's meters; the
   5.1 fill not at all.
+
+## Settings on the pod's own flash, and starting in DFU (build 117)
+
+Until build 117 a pod had its settings only as long as it had power; the Mac put them back after
+every boot. Build 117 keeps them on the pod as well, and adds three things that make booting
+easier. All of it needs kernel build 102 or later (`paniclog_rw` and `llb_rw`, see `kernel/README.md`).
+
+**Settings kept on the pod** (`homepod-keep`, `homepod-nvstore`, web UI: Overview, "Settings kept on
+this HomePod").
+
+- Where: the flash's panic-log area (`/dev/asp0n10`, 1 MiB). audioOS writes there only when its
+  kernel crashes, and nothing needs it to start. A crash report found there (it starts with `FUNK`)
+  is never overwritten without asking; the web UI offers it as a download first.
+- What: `homepod-config export --small`: everything a settings backup holds except a boot sound of
+  the user's own, which is too large. About 3 KB, in one 4 KiB sector, with a header (magic
+  `NICOCFG1`, generation, length, CRC32 of the payload and of the header). **That includes the WiFi
+  key and the Bluetooth link keys, as they are.** "Off" in the web UI (`homepod-keep off`) deletes
+  the stored copy; do that before a pod changes hands.
+- When: `homepod-keep watch` looks every 8 seconds and saves once a change has stayed the same for
+  one look, at most every 30 seconds. `/init` puts the stored settings back before WiFi, AirPlay,
+  Bluetooth and the speaker service start (`homepod-keep restore`, one to two seconds), so the pod joins
+  its network and has its name and sound settings with no Mac involved. `homepod.nokeep` on the
+  kernel command line skips both.
+- The Mac's copy: `homepod-config.sh restore --auto` (what HomePod Hospital runs after a boot) sends
+  the Mac's backup as before, but a pod that has already put its own settings back keeps them and
+  takes only the boot sound from the backup; the Mac's file is then refreshed from the pod (the file
+  it replaces stays as `.prev`). Without `--auto` a restore replaces the pod's settings, as before.
+- **What a power cut can do.** Measured by cutting the power during writes: the flash controller
+  takes a write to this area only from its first sector, the write replaces the whole area, and it
+  does not do that in one step. A write that is cut off leaves nothing of the old content and at
+  best the beginning of the new (in one case the first 32 KiB of 216 KiB, in another nothing of
+  8 KiB). A write that starts anywhere else is refused by the controller. There is no second area
+  to alternate with, so a save cannot be made safe against a power cut in exactly that moment; it is
+  kept short instead (two sectors took about 17 ms; the settings alone are one). If it happens,
+  the pod starts with the built-in settings and the Mac's backup is put back as before.
+  A cut between saves loses nothing.
+
+**DFU at every power-up** (`homepod-dfu-mode`, web UI: Overview, "Starting and restarting").
+
+- A HomePod accepts Nicotine only from the chip's own DFU, and it normally gets there only when it
+  is powered up upside down. The boot ROM also falls into DFU when the first boot loader on the
+  flash (the LLB, `/dev/asp0n2`) is not valid. `homepod-dfu-mode on --yes` inverts the LLB's first
+  byte (0x30 becomes 0xCF); `off` inverts it back. With it on, the pod is in DFU a few seconds after
+  it gets power, whichever way up it is.
+- While it is on the pod cannot start audioOS by itself. `off`, or a restore from DFU (which writes
+  a fresh LLB), ends that.
+- The LLB area is replaced whole on every write as well, about half a second for its 180 KiB. A
+  power cut in that half second can leave no usable LLB: the pod is then in DFU at every power-up,
+  as with "on", but `off` cannot rebuild the LLB. `homepod-dfu-mode off --from-file FILE` writes a
+  saved copy back, and so does a restore. `homepod-dfu-mode backup FILE`, the web UI's "Download the
+  boot loader" and HomePod Hospital (before it switches) make that copy. The LLB is Apple's and
+  signed for one pod: it belongs in no repository.
+
+**Restart into DFU, once** (`homepod-realdfu`). Apple's second boot stage, when it finds the pod
+upside down, asks the top-panel MCU (I2C3, address 0x55) to force the chip into DFU: one frame,
+command 0x21 with the data byte 0x5A (`21 01 00 00 5A 84`; the last byte makes the sum zero). The
+boot ROM itself never looks at the orientation. `homepod-realdfu` sends the same frame from Linux,
+and the pod is in the chip's own DFU about a second later, upright, with nothing on the flash
+changed. That is the DFU gaster works in, unlike the boot loader's own DFU that
+`homepod-pmu dfu-on-reset` reaches.
+
+**Restart** (`homepod-reset`): the watchdog reset, without stopping anything first. From kernel
+build 102 `reboot -f` works too (before, the flash driver's shutdown hook hung).
+
+The web UI's two cards talk to `/www/cgi-bin/keep.cgi` (status, save, on, off, the crash report as a
+download) and `/www/cgi-bin/startup.cgi` (status, `dfu_on`, `dfu_off`, `restart`, `restart_dfu`, the
+LLB as a download). State changes are POSTs with `Content-Type: application/x-homepod`, as
+everywhere in the web UI.
+
+**Booting upside down.** The second boot stage that is sent to a pod to boot Nicotine is Apple's
+too, so it makes the same check: as Apple made it, a pod that is still upside down goes straight
+back to DFU instead of booting. The app's boot-loader builder therefore takes the check out
+(`IBootFlipCheck` in the core, after hBootPatcher): it finds the place where that frame is built
+(the two constants 0x121 and 0x845A, loaded within a few instructions of each other; exactly once
+in every second stage looked at, never in a first stage) and turns the call that sends it into a
+no-op. Four bytes; the sampling before it and everything else stay as they are. Measured on a pod
+lying upside down: Apple's 16.4 second stage unchanged had it back in DFU within 12 seconds, the
+same file with the four bytes changed stayed in recovery mode. Boot loaders built before this was
+added still have the check: "Rebuild release boot loaders" in the app replaces them (the Boot
+loaders card says so when it finds the check still in).
 
 ## Limits and known problems
 

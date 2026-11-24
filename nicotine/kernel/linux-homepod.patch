@@ -671,6 +671,141 @@ index 000000000..79fdc2a03
 +&ps_pcie_aux {
 +	power-domains = <&ps_pcie_ref>;
 +};
+diff --git a/drivers/block/asp.c b/drivers/block/asp.c
+index e329fea00..519cb46d8 100644
+--- a/drivers/block/asp.c
++++ b/drivers/block/asp.c
+@@ -254,6 +254,39 @@ static bool enable_reformat;
+ module_param(enable_reformat, bool, 0644);
+ MODULE_PARM_DESC(enable_reformat, "Automatically format unformatted media");
+ 
++/*
++ * The panic log area is the one piece of auxiliary storage that is safe to
++ * reuse: only XNU writes it, with free-form text, and nothing needs it to boot.
++ * Nicotine keeps its settings there. Writes stay refused until user space arms
++ * them through this parameter, so a stray dd cannot land on it.
++ */
++static bool paniclog_rw;
++module_param(paniclog_rw, bool, 0644);
++MODULE_PARM_DESC(paniclog_rw, "Accept writes to the panic log area (asp*n10)");
++
++/*
++ * The first-stage boot loader (LLB). Replacing it with an image the boot ROM
++ * rejects makes the ROM fall into DFU at every power-up, which is what a pod
++ * that only ever runs Linux wants; writing the saved image back undoes it.
++ * Off unless user space arms it, like the panic log.
++ */
++static bool llb_rw;
++module_param(llb_rw, bool, 0644);
++MODULE_PARM_DESC(llb_rw, "Accept writes to the LLB area (asp*n2). Dangerous.");
++
++/*
++ * The second-stage boot loader with its device tree (asp*n3) and iBoot's
++ * NVRAM (asp*n8). Only for installing a different, Apple-signed boot chain
++ * and for boot loader research; nothing in normal use writes them.
++ */
++static bool fw_rw;
++module_param(fw_rw, bool, 0644);
++MODULE_PARM_DESC(fw_rw, "Accept writes to the firmware area (asp*n3). Dangerous.");
++
++static bool nvram_rw;
++module_param(nvram_rw, bool, 0644);
++MODULE_PARM_DESC(nvram_rw, "Accept writes to the NVRAM area (asp*n8). Dangerous.");
++
+ //static int asp_major;
+ static DEFINE_IDA(asp_instance_ida);
+ 
+@@ -388,6 +421,32 @@ static blk_status_t asp_setup_rw(struct asp_queue *qd, struct request *req,
+ 			BUG();
+ 	}
+ 
++	if (write && qd->type != ASP_QUEUE_TYPE_USERAREA) {
++		/*
++		 * Of the auxiliary areas only the panic log and the LLB may
++		 * be written, and each only while armed. The controller takes
++		 * an auxiliary write only from the area's sector 0 (it
++		 * replaces the whole element), so anything else is refused
++		 * here.
++		 */
++		static const char * const aux_name[ASP_QUEUE_TYPE_COUNT] = {
++			[ASP_QUEUE_TYPE_LLB] = "LLB",
++			[ASP_QUEUE_TYPE_FW] = "firmware",
++			[ASP_QUEUE_TYPE_NVRAM] = "NVRAM",
++			[ASP_QUEUE_TYPE_PANICLOG] = "panic log",
++		};
++		bool armed = (qd->type == ASP_QUEUE_TYPE_PANICLOG && paniclog_rw) ||
++			     (qd->type == ASP_QUEUE_TYPE_LLB && llb_rw) ||
++			     (qd->type == ASP_QUEUE_TYPE_FW && fw_rw) ||
++			     (qd->type == ASP_QUEUE_TYPE_NVRAM && nvram_rw);
++
++		if (!armed || blk_rq_pos(req) != 0)
++			return BLK_STS_IOERR;
++		dev_info(asp->dev, "%s area: writing %u sectors",
++			 aux_name[qd->type],
++			 blk_rq_bytes(req) >> ASP_LBA_SHIFT);
++	}
++
+ 	cmd->flags = ASP_CMD_IO_FLAG_NO_ENCRYPTION;
+ 	cmd->slba = blk_rq_pos(req) >> 3;
+ 	cmd->length = blk_rq_bytes(req) >> ASP_LBA_SHIFT;
+@@ -867,8 +926,11 @@ static int apple_asp_start_disk(struct apple_asp *asp)
+ 	 * NVRAM, so set it to RO outside of the loop such that the statement
+ 	 * can be removed on per-namespace basis.
+ 	 */
+-	set_disk_ro(asp->q_data[ASP_QUEUE_TYPE_LLB].disk, true);
+-	set_disk_ro(asp->q_data[ASP_QUEUE_TYPE_FW].disk, true);
++	/*
++	 * LLB, firmware, NVRAM and the panic log stay writable at the block
++	 * layer; asp_setup_rw() refuses the writes unless the area's own
++	 * switch is set and they start at sector 0.
++	 */
+ 	/* write disallowed at controller level */
+ 	set_disk_ro(asp->q_data[ASP_QUEUE_TYPE_UTILDM].disk, true);
+ 	/* unsafe to write */
+@@ -876,13 +938,11 @@ static int apple_asp_start_disk(struct apple_asp *asp)
+ 	/* unsafe to write */
+ 	set_disk_ro(asp->q_data[ASP_QUEUE_TYPE_CTRLBITS].disk, true);
+ 	set_disk_ro(asp->q_data[ASP_QUEUE_TYPE_EFFACE].disk, true);
+-	set_disk_ro(asp->q_data[ASP_QUEUE_TYPE_NVRAM].disk, true);
+ 	/*
+ 	 * unrecoverable even with DFU, but some applications may want to
+ 	 * write it anyways
+ 	 */
+ 	set_disk_ro(asp->q_data[ASP_QUEUE_TYPE_SYSCFG].disk, true);
+-	set_disk_ro(asp->q_data[ASP_QUEUE_TYPE_PANICLOG].disk, true);
+ 
+ 	/* no partitions on auxiliary storage */
+ 	asp->q_data[ASP_QUEUE_TYPE_LLB].disk->flags = GENHD_FL_NO_PART;
+@@ -1263,6 +1323,20 @@ static void apple_asp_remove(struct platform_device *pdev)
+ }
+ 
+ 
++/*
++ * At reboot the controller only needs its write cache flushed. Running the
++ * whole remove path here (as this driver did) keeps a HomePod from ever
++ * reaching the reset.
++ */
++static void apple_asp_shutdown(struct platform_device *pdev)
++{
++	struct apple_asp *asp = platform_get_drvdata(pdev);
++	struct gendisk *disk = asp ? asp->q_data[ASP_QUEUE_TYPE_USERAREA].disk : NULL;
++
++	if (disk)
++		blkdev_issue_flush(disk->part0);
++}
++
+ static const struct of_device_id apple_asp_of_match[] = {
+ 	{ .compatible = "apple,s5l8960x-ans" },
+ 	{}
+@@ -1276,7 +1350,7 @@ static struct platform_driver apple_asp_driver = {
+ 	},
+ 	.probe = apple_asp_probe,
+ 	.remove = apple_asp_remove,
+-	.shutdown = apple_asp_remove,
++	.shutdown = apple_asp_shutdown,
+ };
+ 
+ module_platform_driver(apple_asp_driver);
 diff --git a/drivers/iommu/apple-dart.c b/drivers/iommu/apple-dart.c
 index 85311e95f..9d9598edb 100644
 --- a/drivers/iommu/apple-dart.c

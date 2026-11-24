@@ -2,15 +2,21 @@
 # homepod-config.sh - keep a HomePod Linux pod's settings on this Mac.
 #
 #   ./homepod-config.sh save                 pull a backup from the running pod
-#   ./homepod-config.sh restore [--wait N]   push this pod's backup back to it
+#   ./homepod-config.sh restore [--wait N] [--auto]
+#                                            push this pod's backup back to it
 #   ./homepod-config.sh status               what the pod and this folder have
 #
-# Why: under Linux the pod has no storage that survives a power cycle, so a
-# WiFi network joined in the web UI, a changed AirPlay name and every Bluetooth
-# pairing are gone after a reboot. This script keeps them here instead:
+# Why: Nicotine runs from RAM. From build 117 the pod keeps its settings on its
+# own flash and puts them back when it starts; before that, a WiFi network
+# joined in the web UI, a changed AirPlay name and every Bluetooth pairing were
+# gone after a reboot. This script keeps a copy here as well:
 #   - after changing something on the pod, run "save"
-#   - after every boot, run "restore" (boot-linux.sh can do that by itself,
-#     see boot-linux-hook.diff)
+#   - after a boot, run "restore". With --auto (what HomePod Hospital does by
+#     itself after it boots a pod) a pod that has already put back its own
+#     settings keeps them, and takes only what its flash has no room for (a boot
+#     sound of your own); the backup here is then refreshed from the pod, the
+#     file it replaces staying as .prev. Without --auto the backup replaces the
+#     pod's settings.
 # Backups live in ./config/homepod-config-<unit>.tar.gz next to this script,
 # one per pod (<unit> is the pod's 4-digit ID, shown by "status" and in the
 # web UI). They contain the WiFi key and the Bluetooth link keys.
@@ -91,10 +97,11 @@ cmd_save() {
 }
 
 cmd_restore() {
-	local wait=0 info unit file ans out err
+	local wait=0 auto="" info unit file ans out err
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--wait) [ $# -ge 2 ] || die "--wait needs a number of seconds"; wait=$2; shift 2 ;;
+		--auto) auto="&auto=1"; shift ;;
 		*) die "restore: unknown option $1" ;;
 		esac
 	done
@@ -115,7 +122,7 @@ cmd_restore() {
 	say "restoring pod $unit from $file ..."
 	# "Expect:" stops curl from pausing for a 100-continue the pod never sends
 	ans=$("$CURL" -s -m 200 -H 'Content-Type: application/x-homepod' -H 'Expect:' \
-		--data-binary @"$file" "$API?action=import" 2>/dev/null)
+		--data-binary @"$file" "$API?action=import$auto" 2>/dev/null)
 	if [ -z "$ans" ]; then
 		# over USB the answer does not depend on the pod's WiFi, so an empty
 		# one is a real failure; ask the pod what it thinks happened
@@ -129,7 +136,17 @@ cmd_restore() {
 		say "restored, but one step did not go through (see the lines above)"
 		return 3 ;;
 	*'"ok":true'*)
-		say "restored"
+		case "$out" in
+		*settings=kept*)
+			# The pod's own copy is the newer one. Bring this Mac's copy up to date with it
+			# (the previous file stays next to it as .prev), so that the Mac has the latest
+			# settings if the pod's copy is ever lost. A subshell: a failed save must not
+			# turn a good start into an error.
+			say "the pod put its own saved settings back when it started; they were kept"
+			if ( cmd_save ) >/dev/null 2>&1; then say "this pod is using the settings it keeps itself; the copy on this Mac was updated from it"
+			else say "this pod is using the settings it keeps itself (the copy on this Mac could not be updated)"; fi ;;
+		*) say "restored" ;;
+		esac
 		return 0 ;;
 	*)
 		err=$(printf '%s\n' "$ans" | json_str error)

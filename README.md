@@ -105,8 +105,11 @@ restore, the setup prompt on your iPhone shows the new color. Details are in
 
 ## Nicotine: Linux on a HomePod
 
-Nicotine makes a HomePod a standalone AirPlay and Bluetooth speaker. It runs entirely from memory and writes nothing to the HomePod, so unplugging power brings back
-whatever was on it before. It also means the Mac has to start it again after every power cut.
+Nicotine makes a HomePod a standalone AirPlay and Bluetooth speaker. It runs entirely from memory, so unplugging power brings back
+whatever was on the HomePod before, and the Mac has to start it again after every power cut. From build 117 it keeps its own
+settings in a small spare area of the HomePod's flash (the WiFi key included; the web UI can switch that off, which deletes
+them), so a freshly booted HomePod is back on your WiFi by itself. Nothing else on the HomePod is written unless you ask for
+it: see "Booting without turning it over" below.
 
 ![The Nicotine tab with the payload, boot, boot loaders and running HomePod cards](docs/images/app-nicotine.png)
 
@@ -119,9 +122,35 @@ whatever was on it before. It also means the Mac has to start it again after eve
 4. After 30 to 40 seconds **Open web UI** appears. The HomePod answers at `http://172.16.42.1/`
    over the USB cable.
 5. Join your WiFi in the web UI's WiFi tab. The HomePod then shows up as an AirPlay speaker.
-6. Click **Save settings**. The Mac puts them back after the next boot.
+6. Settings you change are kept on the HomePod itself (build 117). The Mac keeps a second copy: it brings it up to
+   date after every boot, and **Save settings** does that on demand.
 
 More detail, and what to do when a step fails, is in [docs/nicotine-boot.md](docs/nicotine-boot.md).
+
+### Booting without turning it over
+
+Once Nicotine is running, the **Running HomePod** card has two more buttons (the web UI has them too, on the Overview
+tab under "Starting and restarting"):
+
+- **Wait in DFU at every power-up.** From then on the HomePod is in DFU a few seconds after it gets power, whichever way
+  up it is: plug it in and click **Boot Nicotine**. While this is on, the HomePod cannot start audioOS by itself;
+  **Let it start by itself again** undoes it, and so does a restore. It works by changing one byte of the first boot
+  loader on the HomePod's flash. The app saves a copy of that boot loader on the Mac first.
+- **Restart into DFU.** Puts the running HomePod into DFU once, without unplugging it or turning it over.
+
+Turning the HomePod right-side up before **Boot Nicotine** (step 3) matters with boot loaders built by an earlier
+version of the app: Apple's boot loader sends an upside-down HomePod straight back to DFU. The builder now takes that
+check out, so with boot loaders built from this version on the HomePod boots in any position. The **Boot loaders** card
+tells you when yours still have the check; **Rebuild release boot loaders** replaces them.
+
+### Signing tickets
+
+The app saves Apple's signing tickets for every HomePod it sees in DFU or recovery mode, for the software versions
+Apple still signs (in November 2026 that included 13.4.8 and 18.3). They are in `Tickets/` in the app's Application Support
+folder, one folder per HomePod. A ticket makes a version valid for one HomePod and can only be fetched while Apple
+still gives it out; a saved one keeps working for boot loaders that start from the HomePod's own flash. The HomePod's
+ID is sent to Apple's signing server and nowhere else. To switch this off:
+`defaults write com.nicsfix.homepodrestore saveSigningTickets -bool NO`.
 
 ### The web UI
 

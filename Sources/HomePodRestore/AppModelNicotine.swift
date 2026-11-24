@@ -49,6 +49,15 @@ struct NicotineUIState {
     var settingsMessage: String?
     var settingsFailed = false
 
+    /// How the running pod starts ("wait in DFU every time it gets power"),
+    /// from its startup.cgi. nil until it has been asked, and for a Nicotine
+    /// build before 117, which has no such switch.
+    var startup: NicotineStartup.Status?
+    /// "Switching on…" while a change or a restart into DFU is under way.
+    var startupBusy: String?
+    var startupMessage: String?
+    var startupFailed = false
+
     /// "Checking and installing the payload…" while an import runs.
     var importBusy = false
     var importMessage: String?
@@ -122,6 +131,16 @@ extension AppModel {
         let fm = FileManager.default
         return fm.fileExists(atPath: dir.appendingPathComponent("iBSS.img4").path)
             && fm.fileExists(atPath: dir.appendingPathComponent("iBEC.img4").path)
+    }
+
+    /// Do the boot loaders on this Mac still make Apple's upside-down check
+    /// (a pod that is upside down when Nicotine is booted goes back to DFU)?
+    /// They do if they were built before the app took it out (IBootFlipCheck in
+    /// the core); a rebuild fixes that. nil when there are none yet, or the
+    /// place can't be found in them.
+    var nicotineBootLoadersCheckOrientation: Bool? {
+        guard let pair = nicotineReleaseIBootPair else { return nil }
+        return IBootFlipCheck.isPresent(inFileAt: pair.iBEC)
     }
 
     /// The release pair to boot from, or nil when they aren't built yet. The app
@@ -327,6 +346,8 @@ extension AppModel {
         let dfu = devices.filter { $0.mode == .dfu }
         if dfu.isEmpty { return DFUInstructions.short(then: "Boot Nicotine") }
         if devices.count > 1 { return "Connect only the one HomePod you want to boot. This boot can't choose between several." }
+        // (Not while a boot of ours is running: a pod passing through its first stage looks the same.)
+        if !nicotine.isBusy && dfu[0].isBootLoaderDFU { return DFUInstructions.fromBootLoaderDFU }
         if let ib = dfu[0].iboot, let why = A8BoardGate.bootBlocker(ib) { return why }
         if !nicotineHasReleaseIBoot {
             return "Build the boot loaders first: open the \"Boot loaders\" card below and click \"Build release boot loaders\". It's a one-time step per Mac."
@@ -356,8 +377,11 @@ extension AppModel {
 
         var st = NicotineUIState()
         st.stage = .booting
-        st.log = ["If the HomePod is still upside down from DFU, turn it right-side up now.",
-                  "Booting Nicotine from \(layout.root.path) (\(payload.source.title.lowercased()))"]
+        st.log = ["Booting Nicotine from \(layout.root.path) (\(payload.source.title.lowercased()))"]
+        if nicotineBootLoadersCheckOrientation != false {
+            // Boot loaders that still make the upside-down check (built before the app took it out).
+            st.log.insert("If the HomePod is still upside down from DFU, turn it right-side up now.", at: 0)
+        }
         if let manifest = payload.manifest {
             st.log.append("Payload: \(manifest.summary). Checking its \(manifest.entries.count) files against the MANIFEST first.")
         }
@@ -415,11 +439,13 @@ extension AppModel {
                 return
             }
             let info = try? await pod.info()
+            let startup = try? await NicotineStartup().status()
             await MainActor.run {
                 guard var st = self?.nicotine else { return }
                 st.stage = .up
                 st.podReachable = true
                 st.podInfo = info
+                st.startup = startup
                 st.log.append("The pod is up: \(info?.versionLine ?? "web UI answers at \(NicotinePod.usbAddress)").")
                 self?.nicotine = st
                 self?.autoRestoreNicotineSettingsIfWanted()
@@ -437,7 +463,9 @@ extension AppModel {
             return
         }
         appendNicotineLog("Putting the saved settings back (automatic).")
-        runNicotineSettings(.restore(waitSeconds: 30), automatic: true)
+        // --auto: a pod that has already put back the settings it keeps on its own
+        // flash (Nicotine build 117) keeps those; an older one gets the backup as before.
+        runNicotineSettings(.autoRestore(waitSeconds: 30), automatic: true)
     }
 
     /// Stop a boot that is under way (also stops the wait for the network).
@@ -461,11 +489,13 @@ extension AppModel {
         Task { [weak self] in
             let reachable = await pod.isReachable()
             let info: NicotinePodInfo? = reachable ? (try? await pod.info()) : nil
+            let startup: NicotineStartup.Status? = reachable ? (try? await NicotineStartup().status()) : nil
             await MainActor.run {
                 guard var st = self?.nicotine else { return }
                 st.checkingPod = false
                 st.podReachable = reachable
                 st.podInfo = info
+                st.startup = startup
                 if reachable && st.stage == .idle { st.stage = .up }
                 if !reachable && st.stage == .up { st.stage = .idle }
                 self?.nicotine = st
@@ -475,6 +505,91 @@ extension AppModel {
 
     func openNicotineWebUI() {
         NSWorkspace.shared.open(NicotinePod.webUI)
+    }
+
+    // MARK: Starting in DFU (the pod's startup.cgi, Nicotine build 117)
+
+    /// Copies of pods' first boot loaders, made before "wait in DFU" is switched
+    /// on. They are Apple's files, each signed for one pod: private, like the backups.
+    var nicotineBootLoaderCopies: URL {
+        AppPaths.support.appendingPathComponent("Boot Loader Copies", isDirectory: true)
+    }
+
+    /// Make the running pod wait in DFU every time it gets power, or undo that.
+    /// With it on, the pod never has to be turned over to boot Nicotine; it
+    /// can't start audioOS by itself until this is switched off again.
+    func setNicotineDFUAtPowerUp(_ on: Bool) {
+        guard nicotine.startupBusy == nil else { return }
+        nicotine.startupBusy = on ? "Switching on…" : "Switching off…"
+        nicotine.startupMessage = nil
+        nicotine.startupFailed = false
+        appendNicotineLog(on ? "Making the HomePod wait in DFU every time it gets power."
+                             : "Letting the HomePod start by itself again.")
+        let startup = NicotineStartup()
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let copy = nicotineBootLoaderCopies.appendingPathComponent("llb-\(stamp).img4")
+        Task { [weak self] in
+            // The switch rewrites the pod's first boot loader, which takes about half
+            // a second. Keep what is there now: if the power fails in that half
+            // second, this copy (or a restore) puts it back.
+            var copied = false
+            if on {
+                do { try await startup.saveLLB(to: copy); copied = true } catch { copied = false }
+            }
+            var status: NicotineStartup.Status?
+            var failure: String?
+            do { status = try await startup.setDFUAtPowerUp(on) } catch { failure = error.localizedDescription }
+            let didCopy = copied, newStatus = status, why = failure
+            await MainActor.run {
+                guard var st = self?.nicotine else { return }
+                st.startupBusy = nil
+                if let newStatus {
+                    st.startup = newStatus
+                    st.startupFailed = false
+                    st.startupMessage = newStatus.dfu == .on
+                        ? "On. From now on this HomePod waits in DFU whenever it gets power."
+                        : "Off. This HomePod starts by itself again."
+                    if didCopy { st.log.append("A copy of its first boot loader is in \(copy.path). Keep it private.") }
+                } else {
+                    st.startupFailed = true
+                    st.startupMessage = why ?? "The HomePod didn't answer."
+                }
+                self?.nicotine = st
+            }
+        }
+    }
+
+    /// Put the running pod into DFU now, without unplugging it or turning it
+    /// over. Nicotine stops (it runs from memory); the pod shows up in DFU mode
+    /// a few seconds later, ready for a boot or a restore.
+    func restartNicotineIntoDFU() {
+        guard nicotine.startupBusy == nil else { return }
+        nicotine.startupBusy = "Restarting into DFU…"
+        nicotine.startupMessage = nil
+        nicotine.startupFailed = false
+        appendNicotineLog("Restarting the HomePod into DFU.")
+        Task { [weak self] in
+            var failure: String?
+            do { try await NicotineStartup().restart(intoDFU: true) } catch { failure = error.localizedDescription }
+            let why = failure
+            await MainActor.run {
+                guard var st = self?.nicotine else { return }
+                st.startupBusy = nil
+                if let why {
+                    st.startupFailed = true
+                    st.startupMessage = why
+                } else {
+                    st.startupFailed = false
+                    st.startupMessage = nil
+                    st.log.append("The HomePod is going to DFU. It shows up in DFU mode in a few seconds.")
+                    st.podReachable = false
+                    st.podInfo = nil
+                    st.startup = nil
+                    if st.stage == .up { st.stage = .idle }
+                }
+                self?.nicotine = st
+            }
+        }
     }
 
     // MARK: Saved settings (homepod-config.sh in the payload)
@@ -514,7 +629,7 @@ extension AppModel {
                 switch final {
                 case .done(let text):
                     st.settingsFailed = false
-                    st.settingsMessage = (automatic ? "Saved settings put back automatically: " : "") + text
+                    st.settingsMessage = NicotineSettings.doneMessage(text, automatic: automatic)
                 case .nothingToRestore:
                     st.settingsFailed = false
                     st.settingsMessage = "No saved settings for this HomePod yet. Set it up in the web UI, then click \"Save settings\"."

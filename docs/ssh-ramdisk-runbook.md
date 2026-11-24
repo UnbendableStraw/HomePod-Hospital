@@ -38,7 +38,8 @@ Advanced on → known-good pod in DFU → its card → Check health → **Read S
   (driven by `sshpass`). Confirmed working on-pod in the chat.
 - HomePod uses the **update** ramdisk; "if there's no NAND, it boots into the ssh
   ramdisk." NAND is reachable on the shell as **`/dev/diskN`** (they used
-  `dd if=/dev/disk3`, `cat /dev/disk4`).
+  `dd if=/dev/disk3`, `cat /dev/disk4`). Disk numbers vary between OS versions; find a
+  region by its IOMedia name (`homepod-nand-map.md`).
 
 ### Still OPEN — the one thing to pin on the bench
 `dumpCommand` / `sinkCommand` in `GasterRamdiskBooter.Config` (default

@@ -224,6 +224,10 @@ struct NicotineView: View {
                     Text(dir.path).font(.caption.monospaced()).foregroundStyle(.secondary)
                         .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 }
+                if model.nicotineBootLoadersCheckOrientation == true {
+                    Text("These were built before the app took Apple's upside-down check out of them: the HomePod has to be right-side up when Nicotine is booted, or it goes back to DFU. Rebuild them once and it boots in any position.")
+                        .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
             } else {
                 Text("Nicotine boots on boot loaders built from Apple's own audioOS 16.4 update — downloaded, decrypted on this HomePod, patched and signed, all inside the app. Build them once on this Mac before the first boot.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -307,6 +311,35 @@ struct NicotineView: View {
                         .font(.callout).fixedSize(horizontal: false, vertical: true)
                 }
                 Text(settingsNote).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if let startup = state.startup {
+                    Divider()
+                    Label(startup.dfu == .on ? "This HomePod waits in DFU every time it gets power."
+                                             : (startup.dfu == .off ? "This HomePod starts by itself when it gets power."
+                                                                    : "This HomePod's first boot loader isn't one this switch knows. It may need a restore."),
+                          systemImage: startup.dfu == .on ? "bolt.fill" : "bolt.slash")
+                        .font(.callout.weight(.medium))
+                    HStack {
+                        Button { model.setNicotineDFUAtPowerUp(startup.dfu != .on) } label: {
+                            Text(startup.dfu == .on ? "Let it start by itself again" : "Wait in DFU at every power-up")
+                        }
+                        .disabled(!startup.writable || startup.dfu == .unknown || state.startupBusy != nil)
+                        Button { model.restartNicotineIntoDFU() } label: { Label("Restart into DFU", systemImage: "arrow.clockwise") }
+                            .disabled(!startup.canRestartIntoDFU || state.startupBusy != nil)
+                            .help("Puts this HomePod into DFU now, without unplugging it or turning it over. Nicotine stops.")
+                    }
+                    if let busy = state.startupBusy {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text(busy).font(.callout)
+                        }
+                    } else if let message = state.startupMessage {
+                        Label(message, systemImage: state.startupFailed ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(state.startupFailed ? Color.orange : Color.green)
+                            .font(.callout).fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text("Waiting in DFU at every power-up means the HomePod never has to be turned over: plug it in and click Boot Nicotine. It can't start audioOS by itself until you switch that off again or restore it.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
             } else {
                 Text(state.checkingPod ? "Looking for a pod at \(NicotinePod.usbAddress)…"
                                        : "No pod is answering at \(NicotinePod.usbAddress). After a boot it appears here by itself.")
@@ -329,7 +362,7 @@ struct NicotineView: View {
         }
         let n = settings.savedBackups.count
         let have = n == 0 ? "No backup saved yet." : (n == 1 ? "One backup is saved." : "\(n) backups are saved (one per HomePod).")
-        return "The HomePod forgets WiFi, its AirPlay name, Bluetooth pairings and sound settings when it loses power. Backups are kept on this Mac in \(settings.backupDirectory.path) and contain the WiFi key. " + have
+        return "From Nicotine build 117 the HomePod keeps WiFi, its AirPlay name, Bluetooth pairings and sound settings itself; an older build forgets them when it loses power. Either way a copy is kept on this Mac in \(settings.backupDirectory.path) (it contains the WiFi key) and is put back after a boot when the HomePod has none of its own. " + have
     }
 
     // MARK: log

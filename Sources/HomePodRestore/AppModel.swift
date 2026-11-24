@@ -229,6 +229,9 @@ final class AppModel: ObservableObject {
 
     private func devicesChanged(_ new: [ConnectedDevice]) {
         devices = new
+        // Signing tickets for every pod that shows up, while Apple still gives them
+        // out (TicketVault in the core). Background work; once per pod and run.
+        TicketKeeper.note(new) { [weak self] line in Task { @MainActor in self?.appendNicotineLog(line) } }
         // A finished card stays up (so its "unplug power, then USB…" steps stay
         // visible) until a *different* HomePod shows up on that port.
         for d in new {
@@ -257,6 +260,13 @@ final class AppModel: ObservableObject {
         if kind != .quickCheck && selectedFirmware == nil { return "Choose or download firmware first." }
         guard device.mode == .dfu else { return "The HomePod needs to be in DFU mode." }
         guard let ib = device.iboot, ib.ecid != nil else { return "Couldn't read this device's ID." }
+        // The boot loader's own DFU looks like DFU on USB, but gaster hangs there. A pod
+        // that one of our own boots is sending boot loaders to looks the same for a
+        // moment, so this only speaks up when nothing of ours is running on it.
+        if device.isBootLoaderDFU && jobs[device.locationID]?.isRunning != true && !nicotine.isBusy
+            && syscfg?.running != true && diag?.running != true && fullDiag?.running != true {
+            return DFUInstructions.fromBootLoaderDFU
+        }
         // A quick check only unlocks the chip, so any HomePod board will do. A
         // restore or boot test needs a firmware build for this exact board.
         if let why = kind == .quickCheck ? A8BoardGate.bootBlocker(ib) : A8BoardGate.restoreBlocker(ib) {

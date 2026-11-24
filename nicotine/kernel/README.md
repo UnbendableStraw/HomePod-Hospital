@@ -12,7 +12,7 @@ kernel:
 
 This folder is the corresponding source for those binaries:
 
-- **`linux-homepod.patch`** — everything Nicotine changes in the kernel (13 files,
+- **`linux-homepod.patch`** — everything Nicotine changes in the kernel (14 files,
   about 2,000 added lines), as one patch against
   <https://github.com/HoolockLinux/linux> commit
   `ed8528f482a526371e59711645794c91fafb2b42`:
@@ -25,6 +25,21 @@ This folder is the corresponding source for those binaries:
     for DMA, ring index padding, and bring-up diagnostics that are still in).
   - `arch/arm64/boot/dts/apple/t7000-b238a.dts`: the HomePod device tree.
   - `drivers/video/backlight/apple_pmic_bl.c`: a two-line build fix.
+  - `drivers/block/asp.c` (the NAND driver): four of the small NAND areas can be
+    written, each behind its own switch in `/sys/module/asp/parameters/` that is
+    off after boot. A write must also start at the area's first sector (the
+    controller takes nothing else).
+    - `paniclog_rw`: the panic log area (`asp0n10`), where Nicotine keeps its
+      settings (`homepod-nvstore`).
+    - `llb_rw`: the LLB area (`asp0n2`), written by `homepod-dfu-mode` to make a
+      pod start in DFU at every power-up, and to undo that.
+    - `fw_rw`, `nvram_rw`: the second boot loader (`asp0n3`) and iBoot's NVRAM
+      (`asp0n8`). Nothing in normal use writes them; they exist for installing
+      another Apple-signed boot chain and for boot loader research.
+    SysCfg, the effaceable area and the controller's own areas stay read-only.
+    At reboot the driver now only flushes the write cache; it used to run its
+    whole remove path, which is the suspected reason `reboot` never reached the
+    reset on a HomePod.
 - **`config`** — the exact kernel configuration of the shipped `Image.gz`
   (4K pages, everything built in, no modules).
 - **`m1n1-homepod.patch`** — one change to m1n1 (`src/fb.c`: skip framebuffer
@@ -43,7 +58,7 @@ sudo apt install git make bc bison flex libssl-dev libelf-dev gcc-aarch64-linux-
 ./build.sh
 ```
 
-The shipped kernel is build #97, compiled with `aarch64-linux-gnu-gcc` 13.3.
+The shipped kernel is build #102, compiled with `aarch64-linux-gnu-gcc` 13.3.
 A rebuild will not be byte-identical (the kernel embeds a build number and
 time), but it is the same source and configuration.
 

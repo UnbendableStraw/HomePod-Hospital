@@ -80,6 +80,8 @@ public struct IBootSerial: Equatable, Sendable {
     }
 
     public var isPwned: Bool { pwnd != nil }
+    /// The chip's own DFU: only the boot ROM puts its name (SRTG) in the string.
+    public var isBootROM: Bool { srtg != nil }
     /// A8 (t7000) is the 1st-gen HomePod's SoC.
     public var isA8: Bool { cpid == 0x7000 }
     /// Which A8 board this is (nil when it isn't an A8 or the id is unknown).
@@ -103,6 +105,17 @@ public struct ConnectedDevice: Identifiable, Equatable, Sendable {
     public var id: UInt32 { locationID }
     public var mode: DeviceMode { DeviceMode(productID: productID) }
     public var iboot: IBootSerial? { (mode == .dfu || mode == .recovery) ? IBootSerial(serial) : nil }
+
+    /// In DFU, but not the chip's own: a boot loader is running its DFU, either
+    /// the one on the pod's flash (after a failed start, or when asked through
+    /// the power chip) or one that was just sent over USB. The USB product ID
+    /// is the same as real DFU; the serial string has no SRTG field and reads
+    /// `SDOM:… IBFL:1D`. gaster (checkm8) only works in the boot ROM and hangs here.
+    /// False while the string hasn't been read yet.
+    public var isBootLoaderDFU: Bool {
+        guard mode == .dfu, let ib = iboot, ib.cpid != nil else { return false }
+        return !ib.isBootROM
+    }
 
     public init(locationID: UInt32, productID: Int, productName: String, serial: String, speed: Int?) {
         self.locationID = locationID

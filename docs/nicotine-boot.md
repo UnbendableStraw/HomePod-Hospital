@@ -20,8 +20,9 @@ is written by the boot.
    or two, downloads about 1 MB from Apple and writes nothing to the pod.
 4. **Boot Nicotine** (the pod is already right-side up). After 30 to 40 seconds it answers at
    `172.16.42.1` over the USB cable and **Open web UI** appears.
-5. In the web UI, join WiFi. Then click **Save settings**, so the Mac can put them back after the
-   next power cut.
+5. In the web UI, join WiFi. From Nicotine build 117 the pod keeps its settings on its own flash and
+   puts them back by itself at the next boot. The Mac keeps a second copy: it brings it up to date
+   after every boot, and **Save settings** does that on demand.
 
 ## What the app does
 
@@ -41,6 +42,12 @@ Sidebar → **Nicotine (Linux)** (`Views/NicotineView.swift`), top to bottom:
   `VERSION` from `/etc/os-release`, read over SSH), **Open web UI** (`http://172.16.42.1/`),
   **Restore saved settings** and **Save settings**, and the switch **Restore saved settings
   automatically after boot** (on by default). "Check again" finds a pod booted earlier.
+  With Nicotine build 117 on the pod there are two more buttons: **Wait in DFU at every power-up**
+  (and its opposite, **Let it start by itself again**) and **Restart into DFU**. They talk to the
+  pod's `startup.cgi` (`NicotineStartup` in the core, with curl); what they do on the pod is in
+  [nicotine/README.md](../nicotine/README.md). Before switching "wait in DFU" on, the app saves a
+  copy of the pod's first boot loader to `~/Library/Application Support/HomePod Hospital/Boot Loader
+  Copies/`.
 
 The device card also offers it: "Boot Nicotine (Linux)" in the *Check health* menu (advanced options
 on), and the "Boot Nicotine (Linux)" row among the options for a board with a hardware diagnosis.
@@ -55,6 +62,7 @@ development iBoot. `ReleaseIBootBuilder` (`Sources/HomePodRestoreCore/ReleaseIBo
     find the 16.4 OTA on ipsw.me, read iBSS/iBEC out of it with HTTP range requests (about 1 MB)
     → gaster pwn; gaster decrypt          (decrypted on the pod itself, in pwned DFU)
     → hBootPatcher -airs                  (signature check, IORVBAR, AES)
+    → IBootFlipCheck, iBEC only           (Apple's upside-down check: one call becomes a no-op)
     → IMG4Wrap                            (the app's own code, with the generic A8 ticket)
 
 The ticket is `nicotine/prebuilt/0x7000.im4m`, copied into the app as
@@ -129,10 +137,16 @@ Around the sequence:
 - The version is read with `/usr/bin/ssh … root@172.16.42.1 cat /etc/os-release`. Root needs no
   password; `BatchMode=yes` keeps ssh from ever prompting, and the host key is neither checked nor
   stored (it changes with every boot: the pod has no storage).
-- **Settings.** Under Linux the pod remembers nothing across a power cut. `homepod-config.sh` in the
-  payload keeps one backup per pod (WiFi networks and key, AirPlay name, Bluetooth pairings, sound
-  and light settings). The app runs that script (`/bin/bash homepod-config.sh restore --wait 30` and
+- **Settings.** A Nicotine build before 117 remembers nothing across a power cut; from 117 the pod
+  keeps its settings on its own flash. Either way `homepod-config.sh` in the payload keeps one backup
+  per pod on the Mac (WiFi networks and key, AirPlay name, Bluetooth pairings, sound and light
+  settings). The app runs that script (`/bin/bash homepod-config.sh restore --wait 30` and
   `… save`) and reads its outcome (`NicotineSettings.outcome`). The backups contain the WiFi key.
+  The restore the app does by itself after a boot is `restore --auto --wait 30`: a pod that has
+  already put its own settings back keeps them (the backup must not undo what was changed on the
+  pod since), takes only a boot sound of the user's own from the backup, and the Mac's copy is then
+  refreshed from the pod, the file it replaces staying as `.prev`. "Restore saved settings" in the
+  app is the plain restore and replaces the pod's settings.
 - **Where the backups are.** With your own folder: `<folder>/config/`, the script's default. With
   the built-in or an imported payload: `~/Library/Application Support/HomePod Hospital/Nicotine
   Settings/`, passed to the script as `HOMEPOD_CONFIG_DIR`.
@@ -240,10 +254,14 @@ password is planned.
 | `Sources/HomePodRestoreCore/NicotineBooter.swift` | `NicotineLayout` (folder, payload files, `release-iboot/`), `NicotineBooter` (the sequence; `preflight`), `NicotinePod` (reachability, version), `NicotineSettings` (runs homepod-config.sh), `NicotineError`, `ErrorCatalog.nicotine` |
 | `Sources/HomePodRestoreCore/NicotinePayload.swift` | `NicotineManifest`, `NicotinePayload`, `NicotinePayloadLocator` (lookup order), `NicotinePayloadVerifier`, `NicotinePayloadImporter`, `NicotineHash` |
 | `Sources/HomePodRestoreCore/ReleaseIBoot.swift` | `ReleaseIBootBuilder` (download, decrypt, patch, wrap), `IMG4Wrap` |
-| `Sources/HomePodRestore/AppModelNicotine.swift` | page state, `bootNicotine(reveal:)`, `nicotineBlocker()`, `prepareNicotineReleaseIBoot()`, `nicotineReleaseIBootDir`, import, pod check, save / restore settings, automatic restore |
+| `Sources/HomePodRestoreCore/IBootFlipCheck.swift` | finds Apple's upside-down check in the second stage by its shape and takes it out; `isPresent` for boot loaders that are already built. Tests: `IBootFlipCheckTests.swift` (made-up code; a real second stage with `HOMEPOD_IBEC_DEC=…`) |
+| `Sources/HomePodRestoreCore/NicotineStartup.swift` | the pod's `startup.cgi`: "DFU at every power-up" on / off, restart into DFU, a copy of the first boot loader |
+| `Sources/HomePodRestoreCore/TicketVault.swift` | `TicketVault` (which versions, where the tickets are kept, the tsschecker call), `TicketKeeper` (once per pod and run, from the USB device list) |
+| `Sources/HomePodRestore/AppModelNicotine.swift` | page state, `bootNicotine(reveal:)`, `nicotineBlocker()`, `prepareNicotineReleaseIBoot()`, `nicotineReleaseIBootDir`, import, pod check, save / restore settings, automatic restore, `setNicotineDFUAtPowerUp`, `restartNicotineIntoDFU` |
 | `Sources/HomePodRestore/Views/NicotineView.swift` | the page |
 | `Sources/HomePodRestore/Views/RootView.swift`, `DeviceCard.swift` | sidebar section; the two "Boot Nicotine (Linux)" entry points |
 | `Tests/HomePodRestoreCoreTests/NicotineTests.swift`, `ReleaseIBootTests.swift`, `NicotinePayloadTests.swift` | sequence and boot-loader swap pinned; fake-tool runs; MANIFEST parsing and verification; import; optional real-payload check |
+| `Tests/HomePodRestoreCoreTests/NicotineBuild117Tests.swift`, `NicotineStartupTests.swift`, `TicketVaultTests.swift` | the automatic restore's arguments and outcomes; telling the boot loader's DFU from the chip's; `startup.cgi` answers; ticket names, candidates and outcomes |
 | `scripts/build-app.sh`, `scripts/bundle-tools.sh` | payload build and bundling; tool bundling, hBootPatcher |
 | `nicotine/` | the payload build kit (see its README) |
 

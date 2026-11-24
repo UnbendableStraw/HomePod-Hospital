@@ -17,6 +17,7 @@ import FoundationNetworking
 //   download iBSS.im4p / iBEC.im4p  (audioOS 16.4 OTA, HTTP range reads)
 //   → gaster pwn ; gaster decrypt   (checkm8 AES on the pod → raw iBoot)
 //   → hBootPatcher -airs            (sig-check, IORVBAR, AES)
+//   → IBootFlipCheck (iBEC only)    (the upside-down check: four bytes)
 //   → IMG4Wrap (in this file)       (wrap + sign with the A8 IM4M; no external tool)
 //
 // The IM4M is the generic A8 ticket that ships in this repository's Nicotine
@@ -222,7 +223,13 @@ public final class ReleaseIBootBuilder: @unchecked Sendable {
                 stage(.wrapping, nil)
                 try? FileManager.default.removeItem(at: out)
                 onLog("Signing \(tag)")
-                let rawPayload = try Data(contentsOf: patched)
+                var rawPayload = try Data(contentsOf: patched)
+                if tag == "ibec" {
+                    // Our own patch on top: with the upside-down check out, the pod
+                    // boots in any position (IBootFlipCheck). Never fatal: if the
+                    // place isn't found the boot loader is used as it is.
+                    onLog(IBootFlipCheck.describe(IBootFlipCheck.remove(from: &rawPayload)))
+                }
                 let ticket = try Data(contentsOf: im4m)
                 try IMG4Wrap.wrap(payload: rawPayload, fourcc: tag, im4m: ticket).write(to: out)
             }
